@@ -18,6 +18,11 @@
 #include "system.h"
 #include "utils.h"
 
+#ifdef _UWP
+#define SDLMAIN_DECLSPEC __declspec(dllexport)
+#include "SDL_main.h"
+#endif
+
 u32 g_OsMemSize = 0;
 s32 g_OsMemSizeMb = 16;
 u8 g_Is4Mb = 0;
@@ -93,9 +98,18 @@ static void cleanup(void)
 	// TODO: actually shut down all subsystems
 }
 
+#ifndef _UWP
 int main(int argc, const char **argv)
+#else
+int main(int argc, char **argv)
+#endif
 {
+#ifndef _UWP
 	sysInitArgs(argc, argv);
+#else
+	// yuck
+	sysInitArgs(argc, (const char**) argv);
+#endif
 
 	if (!sysArgCheck("--no-crash-handler")) {
 		crashInit();

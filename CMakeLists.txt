@@ -35,6 +35,8 @@ endif()
 set(ROMID "ntsc-final" CACHE STRING "Which ROM to build an executable for: ntsc-final, pal-final or jpn-final")
 option(FORCE_CROSSCOMPILE "Force cross compiling" NO)
 
+option(UWP_COMPAT "Build as DLL for external boot on UWP devices" OFF)
+
 # Determine target arch
 
 target_architecture(TARGET_ARCH)
@@ -165,6 +167,10 @@ include_directories("${CMAKE_BINARY_DIR}/port/include")
 # Set Release optimization to -Og until I fix the -O2 issues
 if(NOT (CMAKE_BUILD_TYPE STREQUAL "Debug"))
   add_compile_options(-Og)
+endif()
+
+if(UWP_COMPAT)
+  add_compile_definitions(_UWP)
 endif()
 
 # Common CFLAGS
@@ -341,7 +347,13 @@ add_custom_target(pd_headers ALL DEPENDS ${JSON_HEADERS})
 # Game target
 
 set(BIN_NAME "pd${BIN_REGION}.${TARGET_ARCH}")
-add_executable(pd ${SRC})
+if(NOT UWP_COMPAT)
+  add_executable(pd ${SRC})
+else()
+  add_library(pd SHARED ${SRC})
+  target_link_options(pd PRIVATE -static)
+endif()
+
 add_dependencies(pd pd_headers)
 target_link_libraries(pd ${LIBS})
 set_target_properties(pd PROPERTIES OUTPUT_NAME "${BIN_NAME}")

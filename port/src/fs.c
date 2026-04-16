@@ -15,6 +15,10 @@
 #include <direct.h>
 #endif
 
+#ifdef _UWP
+#include "SDL.h"
+#endif
+
 #define DEFAULT_BASEDIR_NAME "data"
 
 static char baseDir[FS_MAXPATH + 1]; // replaces $B
@@ -109,6 +113,7 @@ s32 fsInit(void)
 	// get path to base dir and expand it if needed
 	const char *path = sysArgGetString("--basedir");
 	if (!path) {
+#ifndef _UWP
 		// check if there's a `data` directory in working directory or homeDir, otherwise default to exe directory
 		path = "$E/" DEFAULT_BASEDIR_NAME;
 		if (!portable) {
@@ -118,6 +123,9 @@ s32 fsInit(void)
 				path = "$H/" DEFAULT_BASEDIR_NAME;
 			}
 		}
+#else
+		path = SDL_GetPrefPath(NULL, "perfectdark");
+#endif
 	}
 	strncpy(baseDir, fsFullPath(path), FS_MAXPATH);
 
@@ -159,6 +167,8 @@ s32 fsInit(void)
 			} else {
 				path = "$H";
 			}
+#elif _UWP
+				path = "$H";
 #else
 			// check if working directory is writable, otherwise default to homeDir
 			if (fsPathIsWritable("./")) {
