@@ -40,30 +40,34 @@ jobs:
         run: |
           cmake -G"Unix Makefiles" -Bbuild -DUWP_COMPAT=ON .
           cmake --build build -j$(nproc)
-          echo "==== build tree (dll/exe/a) ===="
-          find build -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.a' \) -print || true
-          ls -la build/ || true
+          ls -la build/*.dll build/*.a || true
 
       - name: Stage DLL for UWP project
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path uwp-deps | Out-Null
-
-          $dll = Get-ChildItem -Path build -Recurse -Filter "libpd*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $dll) {
-            $dll = Get-ChildItem -Path build -Recurse -Filter "pd*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
+          $dll = Get-ChildItem -Path build -Recurse -Filter "libpd*.dll" | Select-Object -First 1
           if (-not $dll) { throw "No pd DLL found under build/" }
-
-          Write-Host "Using DLL: $($dll.FullName)"
           Copy-Item $dll.FullName "uwp-deps/libpd.x86_64.dll" -Force
-
-          $implib = Get-ChildItem -Path build -Recurse -Filter "*pd*.dll.a" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($implib) {
-            Copy-Item $implib.FullName "uwp-deps/libpd.x86_64.dll.a" -Force
-          }
-
+          $implib = Get-ChildItem -Path build -Recurse -Filter "*pd*.dll.a" | Select-Object -First 1
+          if ($implib) { Copy-Item $implib.FullName "uwp-deps/libpd.x86_64.dll.a" -Force }
           Get-ChildItem uwp-deps | Format-Table Name, Length
+
+      - name: Create test signing certificate
+        shell: pwsh
+        run: |
+          $pass = ConvertTo-SecureString -String "pd64-temp" -Force -AsPlainText
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=odolwa" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "PD64 UWP Test" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          Export-PfxCertificate -Cert $cert -FilePath "$env:GITHUB_WORKSPACE\pd64-test.pfx" -Password $pass | Out-Null
+          Export-Certificate -Cert $cert -FilePath "$env:GITHUB_WORKSPACE\pd64-test.cer" | Out-Null
+          Write-Host "Cert thumbprint: $($cert.Thumbprint)"
+          "CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Configure UWP project (Visual Studio generator)
         shell: cmd
@@ -74,7 +78,7 @@ jobs:
           set PD_DIR=%CD%\uwp-deps
           cmake -G "Visual Studio 17 2022" -A x64 -B uwp\build -S uwp -DPD_DIR=%PD_DIR%
 
-      - name: Build UWP project
+      - name: Build UWP project (unsigned package first)
         shell: cmd
         env:
           MSYSTEM: ""
@@ -82,50 +86,82 @@ jobs:
           set MSYSTEM=
           cmake --build uwp\build --config Release -- /m /p:AppxPackageSigningEnabled=false
 
+      - name: Sign MSIX with test certificate
+        shell: pwsh
+        run: |
+          $msix = Get-ChildItem -Path uwp\build -Recurse -Filter "*.msix" |
+            Where-Object { $_.FullName -match "AppPackages" } |
+            Select-Object -First 1
+          if (-not $msix) {
+            $msix = Get-ChildItem -Path uwp\build -Recurse -Filter "*.msix" | Select-Object -First 1
+          }
+          if (-not $msix) { throw "No .msix found to sign" }
+
+          Write-Host "Signing: $($msix.FullName)"
+
+          # Prefer SignTool from Windows SDK
+          $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $signtool) { throw "signtool.exe not found" }
+          Write-Host "Using $($signtool.FullName)"
+
+          & $signtool.FullName sign /fd SHA256 /a /f "$env:GITHUB_WORKSPACE\pd64-test.pfx" /p "pd64-temp" "$($msix.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with $LASTEXITCODE" }
+
+          # Verify
+          & $signtool.FullName verify /pa "$($msix.FullName)"
+          Write-Host "Signed OK"
+
       - name: Collect package files
         shell: pwsh
         run: |
           $out = "artifact/pd64-uwp-x64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          Get-ChildItem -Path uwp/build -Recurse -Include *.exe,*.dll,*.winmd,*.pri,*.appxmanifest,*.appx,*.msix -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName $out -Force -ErrorAction SilentlyContinue }
-
-          $searchRoots = @("uwp/build", "uwp-deps", "build")
-          $names = @(
-            "libpd.x86_64.dll", "pd.x86_64.dll",
-            "SDL2.dll", "zlib1.dll", "z-1.dll",
-            "opengl32.dll", "libgallium_wgl.dll", "libuwp.dll", "dxil.dll"
-          )
-          foreach ($root in $searchRoots) {
-            if (Test-Path $root) {
-              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $names -contains $_.Name } |
-                ForEach-Object { Copy-Item $_.FullName $out -Force }
-            }
+          # Prefer the signed AppPackages msix
+          $msix = Get-ChildItem -Path uwp/build -Recurse -Filter "*.msix" |
+            Where-Object { $_.FullName -match "AppPackages" } |
+            Select-Object -First 1
+          if (-not $msix) {
+            $msix = Get-ChildItem -Path uwp/build -Recurse -Filter "*.msix" | Select-Object -First 1
+          }
+          if ($msix) {
+            Copy-Item $msix.FullName "$out/pd64-uwp_1.0.1.0_x64.msix" -Force
           }
 
-          Copy-Item uwp/Package.appxmanifest $out -Force -ErrorAction SilentlyContinue
+          # Also copy the whole Test folder if present (has dependencies)
+          $testDir = Get-ChildItem -Path uwp/build -Recurse -Directory -Filter "*_Test" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($testDir) {
+            Copy-Item $testDir.FullName "$out/package" -Recurse -Force
+          }
+
+          Copy-Item "$env:GITHUB_WORKSPACE\pd64-test.cer" "$out/pd64-test.cer" -Force
           Copy-Item uwp/pd.ini.xboxone "$out/pd.ini" -Force -ErrorAction SilentlyContinue
           Copy-Item XBOX_ONE.md $out -Force -ErrorAction SilentlyContinue
 
-          if (Test-Path uwp/Assets) {
-            Copy-Item uwp/Assets "$out/Assets" -Recurse -Force
-          }
-
           @"
-          Perfect Dark UWP build (x64)
-          ===========================
+          Perfect Dark UWP – signed package for Xbox Dev Mode
+          ===================================================
 
-          Target: Xbox One / Series in Developer Mode
+          Files:
+            pd64-uwp_1.0.1.0_x64.msix  - install this in Device Portal
+            pd64-test.cer             - test signing certificate
+            pd.ini                    - Xbox One 60 FPS profile
 
-          1. Sideload via Xbox Device Portal.
-          2. Set app type to Game (not App).
-          3. Launch once to create LocalState.
-          4. Copy ROM as pd.ntsc-final.z64 into LocalState.
-          5. Copy pd.ini into LocalState (Xbox One 60 FPS profile).
+          Install steps:
+          1. Open Xbox Device Portal
+          2. Go to Apps / Install
+          3. Upload pd64-uwp_1.0.1.0_x64.msix
+             (If it complains about the certificate, install pd64-test.cer first
+              under Certificate Manager / trusted people, or try again — Dev Mode
+              often accepts test-signed packages.)
+          4. Set the app type to Game
+          5. Launch once, then put pd.ntsc-final.z64 + pd.ini in LocalState
 
-          See XBOX_ONE.md for details.
+          Publisher in the package is CN=odolwa (matches the test cert).
           "@ | Set-Content -Path "$out/INSTALL.txt" -Encoding UTF8
 
           Get-ChildItem $out -Recurse | Select-Object FullName, Length
