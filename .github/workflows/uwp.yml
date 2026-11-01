@@ -10,9 +10,6 @@ on:
 jobs:
   build-uwp-x64:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
 
     steps:
       - name: Checkout
@@ -35,22 +32,50 @@ jobs:
             mingw-w64-x86_64-cmake
 
       - name: Build game as UWP-compatible DLL
+        shell: msys2 {0}
         run: |
           cmake -G"Unix Makefiles" -Bbuild -DUWP_COMPAT=ON .
           cmake --build build -j$(nproc)
-          ls -la build/
+          echo "==== build tree (dll/exe/a) ===="
+          find build -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.a' -o -name '*.so' \) -print || true
+          ls -la build/ || true
 
       - name: Stage DLL for UWP project
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path uwp-deps | Out-Null
-          # MinGW names the shared lib pd.x86_64.dll; UWP CMake expects libpd.x86_64.dll
-          $dll = Get-ChildItem -Path build -Filter "pd*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          $implib = Get-ChildItem -Path build -Filter "pd*.dll.a" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $dll) { throw "pd DLL not found under build/" }
-          Copy-Item $dll.FullName "uwp-deps/libpd.x86_64.dll"
-          if ($implib) { Copy-Item $implib.FullName "uwp-deps/libpd.x86_64.dll.a" }
-          Get-ChildItem uwp-deps
+
+          Write-Host "Scanning build/ for libraries..."
+          Get-ChildItem -Path build -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -match '\.(dll|exe|a)$' } |
+            ForEach-Object { Write-Host $_.FullName }
+
+          # Prefer shared lib produced by UWP_COMPAT (various MinGW naming styles)
+          $candidates = @()
+          $candidates += Get-ChildItem -Path build -Recurse -Filter "libpd*.dll" -ErrorAction SilentlyContinue
+          $candidates += Get-ChildItem -Path build -Recurse -Filter "pd*.dll" -ErrorAction SilentlyContinue
+          $candidates += Get-ChildItem -Path build -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue
+
+          $dll = $candidates | Select-Object -First 1
+          if (-not $dll) {
+            throw "No DLL found under build/. UWP_COMPAT shared library was not produced."
+          }
+
+          Write-Host "Using DLL: $($dll.FullName)"
+          Copy-Item $dll.FullName "uwp-deps/libpd.x86_64.dll" -Force
+
+          $implib = Get-ChildItem -Path build -Recurse -Filter "*pd*.dll.a" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $implib) {
+            $implib = Get-ChildItem -Path build -Recurse -Filter "*.dll.a" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if ($implib) {
+            Write-Host "Using import lib: $($implib.FullName)"
+            Copy-Item $implib.FullName "uwp-deps/libpd.x86_64.dll.a" -Force
+          } else {
+            Write-Host "WARNING: no import library (.dll.a) found"
+          }
+
+          Get-ChildItem uwp-deps | Format-Table Name, Length
 
       - name: Configure UWP project (Visual Studio generator)
         shell: pwsh
@@ -69,11 +94,9 @@ jobs:
           $out = "artifact/pd64-uwp-x64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          # Primary outputs
           Get-ChildItem -Path uwp/build -Recurse -Include *.exe,*.dll,*.winmd,*.pri,*.appxmanifest -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName $out -Force -ErrorAction SilentlyContinue }
 
-          # Known dependency DLLs from FetchContent / MinGW
           $searchRoots = @("uwp/build", "uwp-deps", "build")
           $names = @(
             "libpd.x86_64.dll", "pd.x86_64.dll",
@@ -88,29 +111,25 @@ jobs:
             }
           }
 
-          # Manifest + Xbox One config
           Copy-Item uwp/Package.appxmanifest $out -Force -ErrorAction SilentlyContinue
           Copy-Item uwp/pd.ini.xboxone "$out/pd.ini" -Force -ErrorAction SilentlyContinue
           Copy-Item XBOX_ONE.md $out -Force -ErrorAction SilentlyContinue
 
-          # Assets if present
           if (Test-Path uwp/Assets) {
             Copy-Item uwp/Assets "$out/Assets" -Recurse -Force
           }
 
-          # README for install
           @"
           Perfect Dark UWP build (x64)
           ===========================
 
           Target: Xbox One / Series in Developer Mode
 
-          1. In Xbox Device Portal, install/sideload the package contents
-             (or the .appx/.msix if present).
-          2. Set the app type to Game (not App).
+          1. Sideload via Xbox Device Portal.
+          2. Set app type to Game (not App).
           3. Launch once to create LocalState.
-          4. Copy your ROM as: pd.ntsc-final.z64 into LocalState.
-          5. Copy pd.ini from this folder into LocalState (Xbox One 60 FPS profile).
+          4. Copy ROM as pd.ntsc-final.z64 into LocalState.
+          5. Copy pd.ini into LocalState (Xbox One 60 FPS profile).
 
           See XBOX_ONE.md for details.
           "@ | Set-Content -Path "$out/INSTALL.txt" -Encoding UTF8
@@ -124,12 +143,13 @@ jobs:
           path: artifact/pd64-uwp-x64/
           retention-days: 14
 
-      - name: Upload build logs on failure
+      - name: Upload build tree on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: uwp-build-logs
+          name: uwp-build-debug
           path: |
             build/
+            uwp-deps/
             uwp/build/
           retention-days: 7
