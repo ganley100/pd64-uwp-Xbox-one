@@ -9,13 +9,16 @@ on:
 
 jobs:
   build-uwp-x64:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Setup MSBuild / Visual Studio
+        uses: microsoft/setup-msbuild@v2
 
       - name: Setup MSYS2 (MinGW64)
         uses: msys2/setup-msys2@v2
@@ -30,6 +33,7 @@ jobs:
             mingw-w64-x86_64-SDL2
             mingw-w64-x86_64-zlib
             mingw-w64-x86_64-cmake
+          suppress-deprecation-warnings: true
 
       - name: Build game as UWP-compatible DLL
         shell: msys2 {0}
@@ -37,7 +41,7 @@ jobs:
           cmake -G"Unix Makefiles" -Bbuild -DUWP_COMPAT=ON .
           cmake --build build -j$(nproc)
           echo "==== build tree (dll/exe/a) ===="
-          find build -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.a' -o -name '*.so' \) -print || true
+          find build -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.a' \) -print || true
           ls -la build/ || true
 
       - name: Stage DLL for UWP project
@@ -45,48 +49,38 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path uwp-deps | Out-Null
 
-          Write-Host "Scanning build/ for libraries..."
-          Get-ChildItem -Path build -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -match '\.(dll|exe|a)$' } |
-            ForEach-Object { Write-Host $_.FullName }
-
-          # Prefer shared lib produced by UWP_COMPAT (various MinGW naming styles)
-          $candidates = @()
-          $candidates += Get-ChildItem -Path build -Recurse -Filter "libpd*.dll" -ErrorAction SilentlyContinue
-          $candidates += Get-ChildItem -Path build -Recurse -Filter "pd*.dll" -ErrorAction SilentlyContinue
-          $candidates += Get-ChildItem -Path build -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue
-
-          $dll = $candidates | Select-Object -First 1
+          $dll = Get-ChildItem -Path build -Recurse -Filter "libpd*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $dll) {
-            throw "No DLL found under build/. UWP_COMPAT shared library was not produced."
+            $dll = Get-ChildItem -Path build -Recurse -Filter "pd*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
           }
+          if (-not $dll) { throw "No pd DLL found under build/" }
 
           Write-Host "Using DLL: $($dll.FullName)"
           Copy-Item $dll.FullName "uwp-deps/libpd.x86_64.dll" -Force
 
           $implib = Get-ChildItem -Path build -Recurse -Filter "*pd*.dll.a" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $implib) {
-            $implib = Get-ChildItem -Path build -Recurse -Filter "*.dll.a" -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
           if ($implib) {
-            Write-Host "Using import lib: $($implib.FullName)"
             Copy-Item $implib.FullName "uwp-deps/libpd.x86_64.dll.a" -Force
-          } else {
-            Write-Host "WARNING: no import library (.dll.a) found"
           }
 
           Get-ChildItem uwp-deps | Format-Table Name, Length
 
       - name: Configure UWP project (Visual Studio generator)
-        shell: pwsh
+        shell: cmd
+        env:
+          MSYSTEM: ""
         run: |
-          $pdDir = (Resolve-Path "uwp-deps").Path
-          cmake -G "Visual Studio 17 2022" -A x64 -B uwp/build -S uwp -DPD_DIR="$pdDir"
+          set MSYSTEM=
+          set PD_DIR=%CD%\uwp-deps
+          cmake -G "Visual Studio 17 2022" -A x64 -B uwp\build -S uwp -DPD_DIR=%PD_DIR%
 
       - name: Build UWP project
-        shell: pwsh
+        shell: cmd
+        env:
+          MSYSTEM: ""
         run: |
-          cmake --build uwp/build --config Release -- /m /p:AppxPackageSigningEnabled=false
+          set MSYSTEM=
+          cmake --build uwp\build --config Release -- /m /p:AppxPackageSigningEnabled=false
 
       - name: Collect package files
         shell: pwsh
@@ -94,7 +88,7 @@ jobs:
           $out = "artifact/pd64-uwp-x64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          Get-ChildItem -Path uwp/build -Recurse -Include *.exe,*.dll,*.winmd,*.pri,*.appxmanifest -ErrorAction SilentlyContinue |
+          Get-ChildItem -Path uwp/build -Recurse -Include *.exe,*.dll,*.winmd,*.pri,*.appxmanifest,*.appx,*.msix -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName $out -Force -ErrorAction SilentlyContinue }
 
           $searchRoots = @("uwp/build", "uwp-deps", "build")
