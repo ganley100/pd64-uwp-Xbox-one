@@ -1,0 +1,135 @@
+name: UWP / Xbox build
+
+on:
+  push:
+    branches: [ "uwp-compat", "port" ]
+  pull_request:
+    branches: [ "uwp-compat", "port" ]
+  workflow_dispatch:
+
+jobs:
+  build-uwp-x64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 (MinGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-cmake
+
+      - name: Build game as UWP-compatible DLL
+        run: |
+          cmake -G"Unix Makefiles" -Bbuild -DUWP_COMPAT=ON .
+          cmake --build build -j$(nproc)
+          ls -la build/
+
+      - name: Stage DLL for UWP project
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path uwp-deps | Out-Null
+          # MinGW names the shared lib pd.x86_64.dll; UWP CMake expects libpd.x86_64.dll
+          $dll = Get-ChildItem -Path build -Filter "pd*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $implib = Get-ChildItem -Path build -Filter "pd*.dll.a" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dll) { throw "pd DLL not found under build/" }
+          Copy-Item $dll.FullName "uwp-deps/libpd.x86_64.dll"
+          if ($implib) { Copy-Item $implib.FullName "uwp-deps/libpd.x86_64.dll.a" }
+          Get-ChildItem uwp-deps
+
+      - name: Configure UWP project (Visual Studio generator)
+        shell: pwsh
+        run: |
+          $pdDir = (Resolve-Path "uwp-deps").Path
+          cmake -G "Visual Studio 17 2022" -A x64 -B uwp/build -S uwp -DPD_DIR="$pdDir"
+
+      - name: Build UWP project
+        shell: pwsh
+        run: |
+          cmake --build uwp/build --config Release -- /m /p:AppxPackageSigningEnabled=false
+
+      - name: Collect package files
+        shell: pwsh
+        run: |
+          $out = "artifact/pd64-uwp-x64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          # Primary outputs
+          Get-ChildItem -Path uwp/build -Recurse -Include *.exe,*.dll,*.winmd,*.pri,*.appxmanifest -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $out -Force -ErrorAction SilentlyContinue }
+
+          # Known dependency DLLs from FetchContent / MinGW
+          $searchRoots = @("uwp/build", "uwp-deps", "build")
+          $names = @(
+            "libpd.x86_64.dll", "pd.x86_64.dll",
+            "SDL2.dll", "zlib1.dll", "z-1.dll",
+            "opengl32.dll", "libgallium_wgl.dll", "libuwp.dll", "dxil.dll"
+          )
+          foreach ($root in $searchRoots) {
+            if (Test-Path $root) {
+              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $names -contains $_.Name } |
+                ForEach-Object { Copy-Item $_.FullName $out -Force }
+            }
+          }
+
+          # Manifest + Xbox One config
+          Copy-Item uwp/Package.appxmanifest $out -Force -ErrorAction SilentlyContinue
+          Copy-Item uwp/pd.ini.xboxone "$out/pd.ini" -Force -ErrorAction SilentlyContinue
+          Copy-Item XBOX_ONE.md $out -Force -ErrorAction SilentlyContinue
+
+          # Assets if present
+          if (Test-Path uwp/Assets) {
+            Copy-Item uwp/Assets "$out/Assets" -Recurse -Force
+          }
+
+          # README for install
+          @"
+          Perfect Dark UWP build (x64)
+          ===========================
+
+          Target: Xbox One / Series in Developer Mode
+
+          1. In Xbox Device Portal, install/sideload the package contents
+             (or the .appx/.msix if present).
+          2. Set the app type to Game (not App).
+          3. Launch once to create LocalState.
+          4. Copy your ROM as: pd.ntsc-final.z64 into LocalState.
+          5. Copy pd.ini from this folder into LocalState (Xbox One 60 FPS profile).
+
+          See XBOX_ONE.md for details.
+          "@ | Set-Content -Path "$out/INSTALL.txt" -Encoding UTF8
+
+          Get-ChildItem $out -Recurse | Select-Object FullName, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pd64-uwp-x64
+          path: artifact/pd64-uwp-x64/
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uwp-build-logs
+          path: |
+            build/
+            uwp/build/
+          retention-days: 7
