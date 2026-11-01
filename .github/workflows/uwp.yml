@@ -105,8 +105,8 @@ jobs:
           if (-not $signtool) { throw "signtool.exe not found" }
 
           & $signtool.FullName sign /fd SHA256 /a /f "$env:GITHUB_WORKSPACE\pd64-test.pfx" /p "pd64-temp" "$($msix.FullName)"
-          if ($LASTEXITCODE -ne 0) { throw "signtool failed with $LASTEXITCODE" }
-          & $signtool.FullName verify /pa "$($msix.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with $LASTEXITCODE" }
+          Write-Host "Successfully signed (self-signed; verify against trusted roots will fail on CI - expected)"
 
       - name: Collect exactly 3 files
         shell: pwsh
@@ -134,7 +134,6 @@ jobs:
               Select-Object -First 1
           }
           if (-not $dep) {
-            # Fallback: any VCLibs appx
             $dep = Get-ChildItem -Path uwp/build -Recurse -Filter "*VCLibs*.appx" -ErrorAction SilentlyContinue |
               Select-Object -First 1
           }
