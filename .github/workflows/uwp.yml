@@ -106,7 +106,7 @@ jobs:
 
           & $signtool.FullName sign /fd SHA256 /a /f "$env:GITHUB_WORKSPACE\pd64-test.pfx" /p "pd64-temp" "$($msix.FullName)"
           if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with $LASTEXITCODE" }
-          Write-Host "Successfully signed (self-signed; verify against trusted roots will fail on CI - expected)"
+          Write-Host "Successfully signed"
 
       - name: Collect exactly 3 files
         shell: pwsh
@@ -114,7 +114,6 @@ jobs:
           $out = "artifact/pd64-uwp-x64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          # 1) App MSIX (signed)
           $msix = Get-ChildItem -Path uwp/build -Recurse -Filter "*.msix" |
             Where-Object { $_.FullName -match "AppPackages" -and $_.Name -notmatch "VCLibs|Framework|Dependency" } |
             Select-Object -First 1
@@ -124,9 +123,8 @@ jobs:
               Select-Object -First 1
           }
           if (-not $msix) { throw "App msix not found" }
-          Copy-Item $msix.FullName "$out/pd64-uwp_1.0.1.0_x64.msix" -Force
+          Copy-Item $msix.FullName "$out/PerfectDark64_1.0.2.0_x64.msix" -Force
 
-          # 2) Dependency (VCLibs x64)
           $dep = Get-ChildItem -Path uwp/build -Recurse -Filter "Microsoft.VCLibs.x64*.appx" -ErrorAction SilentlyContinue |
             Select-Object -First 1
           if (-not $dep) {
@@ -140,7 +138,6 @@ jobs:
           if (-not $dep) { throw "VCLibs dependency .appx not found" }
           Copy-Item $dep.FullName "$out/Microsoft.VCLibs.x64.14.00.appx" -Force
 
-          # 3) Certificate
           Copy-Item "$env:GITHUB_WORKSPACE\pd64-test.cer" "$out/pd64-test.cer" -Force
 
           Write-Host "Artifact contents (should be exactly 3 files):"
