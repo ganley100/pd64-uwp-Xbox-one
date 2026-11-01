@@ -1,0 +1,25 @@
+; Perfect Dark – original Xbox One profile (target ~60 FPS)
+; Copy this file to LocalState as pd.ini after first launch.
+
+[Video]
+DefaultWidth=1280
+DefaultHeight=720
+DefaultFullscreen=1
+ExclusiveFullscreen=1
+CenterWindow=0
+AllowHiDpi=0
+VSync=1
+FramerateLimit=60
+DisplayFPS=1
+DisplayFPSInterval=1.0
+MSAA=1
+FramebufferEffects=0
+TextureFilter=1
+TextureFilter2D=1
+DetailTextures=0
+MipmapFilter=1
+AnisotropicFilter=0
+
+[Game]
+MemorySize=16
+CenterHUD=0
